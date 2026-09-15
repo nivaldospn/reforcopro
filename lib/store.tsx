@@ -89,6 +89,51 @@ type Payment = {
   status: 'paid' | 'pending';
 };
 
+export type FinancialEntryCategory = 'mensalidade' | 'aula_particular' | 'matricula' | 'material' | 'outros';
+export type FinancialEntryStatus = 'recebido' | 'pendente' | 'cancelado';
+export type FinancialPaymentMethod = 'pix' | 'cartao' | 'dinheiro' | 'transferencia' | 'outro';
+
+export type FinancialEntry = {
+  id: string;
+  description: string;
+  amount: number;
+  date: string;
+  category: FinancialEntryCategory;
+  paymentMethod: FinancialPaymentMethod;
+  status: FinancialEntryStatus;
+  notes?: string;
+  createdAt: string;
+};
+
+export type FinancialExpenseCategory = 'aluguel' | 'energia' | 'internet' | 'material_escolar' | 'funcionarios' | 'transporte' | 'marketing' | 'equipamentos' | 'manutencao' | 'outros';
+export type FinancialExpenseStatus = 'pago' | 'pendente' | 'cancelado';
+
+export type FinancialExpense = {
+  id: string;
+  description: string;
+  amount: number;
+  date: string;
+  category: FinancialExpenseCategory;
+  paymentMethod: FinancialPaymentMethod;
+  status: FinancialExpenseStatus;
+  notes?: string;
+  createdAt: string;
+};
+
+export type AccountPayableStatus = 'pendente' | 'pago' | 'vencido' | 'cancelado';
+
+export type AccountPayable = {
+  id: string;
+  description: string;
+  amount: number;
+  dueDate: string;
+  paidAt?: string;
+  category: FinancialExpenseCategory;
+  status: AccountPayableStatus;
+  notes?: string;
+  createdAt: string;
+};
+
 import { WhatsAppConnection, WhatsAppSettings, WhatsAppMessageLog } from './datafy/types';
 
 interface AppContextType {
@@ -99,6 +144,9 @@ interface AppContextType {
   classes: Class[];
   payments: Payment[];
   grades: StudentGrade[];
+  financialEntries: FinancialEntry[];
+  financialExpenses: FinancialExpense[];
+  accountsPayable: AccountPayable[];
   whatsappConnection: WhatsAppConnection | null;
   whatsappSettings: WhatsAppSettings | null;
   whatsappLogs: WhatsAppMessageLog[];
@@ -122,6 +170,16 @@ interface AppContextType {
   togglePaymentStatus: (id: string) => void;
   addGrade: (grade: Omit<StudentGrade, 'id'>) => string;
   deleteGrade: (id: string) => void;
+  // Financial Module
+  addFinancialEntry: (entry: Omit<FinancialEntry, 'id' | 'createdAt'>) => string;
+  updateFinancialEntry: (id: string, entry: Partial<FinancialEntry>) => void;
+  deleteFinancialEntry: (id: string) => void;
+  addFinancialExpense: (expense: Omit<FinancialExpense, 'id' | 'createdAt'>) => string;
+  updateFinancialExpense: (id: string, expense: Partial<FinancialExpense>) => void;
+  deleteFinancialExpense: (id: string) => void;
+  addAccountPayable: (account: Omit<AccountPayable, 'id' | 'createdAt'>) => string;
+  updateAccountPayable: (id: string, account: Partial<AccountPayable>) => void;
+  deleteAccountPayable: (id: string) => void;
   saveWhatsAppConnection: (data: Partial<WhatsAppConnection>) => Promise<void>;
   disconnectWhatsApp: () => Promise<void>;
   saveWhatsAppSettings: (data: Partial<WhatsAppSettings>) => Promise<void>;
@@ -142,6 +200,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [classes, setClasses] = useState<Class[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [grades, setGrades] = useState<StudentGrade[]>([]);
+  const [financialEntries, setFinancialEntries] = useState<FinancialEntry[]>([]);
+  const [financialExpenses, setFinancialExpenses] = useState<FinancialExpense[]>([]);
+  const [accountsPayable, setAccountsPayable] = useState<AccountPayable[]>([]);
   const [whatsappConnection, setWhatsappConnection] = useState<WhatsAppConnection | null>(null);
   const [whatsappSettings, setWhatsappSettings] = useState<WhatsAppSettings | null>(null);
   const [whatsappLogs, setWhatsappLogs] = useState<WhatsAppMessageLog[]>([]);
@@ -168,6 +229,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setClasses([]);
         setPayments([]);
         setGrades([]);
+        setFinancialEntries([]);
+        setFinancialExpenses([]);
+        setAccountsPayable([]);
         setWhatsappConnection(null);
         setWhatsappSettings(null);
         setWhatsappLogs([]);
@@ -221,7 +285,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const loadBusinessData = async (userId: string) => {
     try {
-      const [resStudents, resGuardians, resClasses, resPayments, resGrades, resConn, resSettings, resLogs] = await Promise.all([
+      const [resStudents, resGuardians, resClasses, resPayments, resGrades, resConn, resSettings, resLogs, resEntries, resExpenses, resAccPayable] = await Promise.all([
         supabase.from('students').select('*').eq('user_id', userId),
         supabase.from('guardians').select('*').eq('user_id', userId),
         supabase.from('classes').select('*').eq('user_id', userId),
@@ -230,6 +294,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         supabase.from('whatsapp_connections').select('*').eq('user_id', userId).eq('provider', 'datafy').maybeSingle(),
         supabase.from('whatsapp_settings').select('*').eq('user_id', userId).maybeSingle(),
         supabase.from('whatsapp_message_logs').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(100),
+        Promise.resolve(supabase.from('financial_entries').select('*').eq('user_id', userId).order('date', { ascending: false })).catch(() => ({ data: [] })),
+        Promise.resolve(supabase.from('financial_expenses').select('*').eq('user_id', userId).order('date', { ascending: false })).catch(() => ({ data: [] })),
+        Promise.resolve(supabase.from('accounts_payable').select('*').eq('user_id', userId).order('due_date', { ascending: true })).catch(() => ({ data: [] })),
       ]);
 
       if (resStudents.data) setStudents(resStudents.data.map(s => ({
@@ -275,6 +342,49 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         id: g.id, studentId: g.student_id, subject: g.subject, date: g.date, grade: g.grade, notes: g.notes, createdAt: g.created_at
       })));
 
+      // Financial module data (graceful — tables may not exist yet before SQL is executed)
+      if ((resEntries as any)?.data) {
+        setFinancialEntries(((resEntries as any).data || []).map((e: any) => ({
+          id: e.id,
+          description: e.description,
+          amount: Number(e.amount),
+          date: e.date,
+          category: e.category as FinancialEntryCategory,
+          paymentMethod: e.payment_method as FinancialPaymentMethod,
+          status: e.status as FinancialEntryStatus,
+          notes: e.notes,
+          createdAt: e.created_at,
+        })));
+      }
+
+      if ((resExpenses as any)?.data) {
+        setFinancialExpenses(((resExpenses as any).data || []).map((e: any) => ({
+          id: e.id,
+          description: e.description,
+          amount: Number(e.amount),
+          date: e.date,
+          category: e.category as FinancialExpenseCategory,
+          paymentMethod: e.payment_method as FinancialPaymentMethod,
+          status: e.status as FinancialExpenseStatus,
+          notes: e.notes,
+          createdAt: e.created_at,
+        })));
+      }
+
+      if ((resAccPayable as any)?.data) {
+        setAccountsPayable(((resAccPayable as any).data || []).map((a: any) => ({
+          id: a.id,
+          description: a.description,
+          amount: Number(a.amount),
+          dueDate: a.due_date,
+          paidAt: a.paid_at,
+          category: a.category as FinancialExpenseCategory,
+          status: a.status as AccountPayableStatus,
+          notes: a.notes,
+          createdAt: a.created_at,
+        })));
+      }
+
       if (resConn.data) {
         setWhatsappConnection(resConn.data as WhatsAppConnection);
       } else {
@@ -290,7 +400,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           user_id: userId,
           enabled: false,
           reminder_time: '08:00',
-          message_template: `Olá, {responsavel}! 😊\n\nPassando para lembrar que a mensalidade do aluno {aluno} vence hoje.\n\nValor: {valor}\nVencimento: {vencimento}\n\nObrigado!`,
+          days_before: 3,
+          message_template: `Olá, {responsavel}! 😊\n\nPassando para lembrar que a mensalidade do aluno {aluno}, no valor de {valor}, vence no dia {vencimento}.\n\nCaso já tenha realizado o pagamento, desconsidere esta mensagem. 😊\n\nObrigado!`,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         });
@@ -384,7 +495,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         goals: s.goals || null
       };
 
-      supabase.from('students').insert(payload).then(({ error }) => {
+      Promise.resolve(supabase.from('students').insert(payload)).then(({ error }) => {
         if (error) {
           console.error('[Supabase] Erro ao cadastrar aluno:', error.message, error.details, error.hint, error);
           alert(`Erro Supabase ao salvar aluno: ${error.message || JSON.stringify(error)}`);
@@ -422,7 +533,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (s.subject !== undefined) up.subject = s.subject;
       if (s.gradeLevel !== undefined) up.grade_level = s.gradeLevel;
       if (s.goals !== undefined) up.goals = s.goals;
-      supabase.from('students').update(up).eq('id', id).then(({ error }) => {
+      Promise.resolve(supabase.from('students').update(up).eq('id', id)).then(({ error }) => {
         if (error) {
           console.error('[Supabase] Erro ao atualizar aluno:', error.message, error.details, error);
           alert(`Erro ao atualizar aluno: ${error.message}`);
@@ -437,7 +548,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const backup = students.find(item => item.id === id);
     setStudents(prev => prev.filter(item => item.id !== id));
     if (user) {
-      supabase.from('students').delete().eq('id', id).then(({ error }) => {
+      Promise.resolve(supabase.from('students').delete().eq('id', id)).then(({ error }) => {
         if (error) {
           console.error('[Supabase] Erro ao excluir aluno:', error.message, error.details, error);
           alert(`Erro ao excluir aluno: ${error.message}`);
@@ -470,7 +581,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         photo_url: g.photo || null
       };
 
-      supabase.from('guardians').insert(payload).then(({ error }) => {
+      Promise.resolve(supabase.from('guardians').insert(payload)).then(({ error }) => {
         if (error) {
           console.error('[Supabase] Erro ao cadastrar responsável:', error.message, error.details, error.hint, error);
           alert(`Erro Supabase ao salvar responsável: ${error.message || JSON.stringify(error)}`);
@@ -501,7 +612,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if(g.email !== undefined) up.email = g.email || null;
       if(g.address !== undefined) up.address = g.address || null;
       if(g.observations !== undefined) up.notes = g.observations || null;
-      supabase.from('guardians').update(up).eq('id', id).then(({ error }) => {
+      Promise.resolve(supabase.from('guardians').update(up).eq('id', id)).then(({ error }) => {
         if (error) {
           console.error('[Supabase] Erro ao atualizar responsável:', error);
           alert(`Erro ao atualizar responsável: ${error.message}`);
@@ -516,7 +627,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const backup = guardians.find(item => item.id === id);
     setGuardians(prev => prev.filter(item => item.id !== id));
     if (user) {
-      supabase.from('guardians').delete().eq('id', id).then(({ error }) => {
+      Promise.resolve(supabase.from('guardians').delete().eq('id', id)).then(({ error }) => {
         if (error) {
           console.error('[Supabase] Erro ao excluir responsável:', error);
           alert(`Erro ao excluir responsável: ${error.message}`);
@@ -533,9 +644,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const id = crypto.randomUUID();
     setClasses(prev => [...prev, { ...c, id }]);
     if (user) {
-      supabase.from('classes').insert({
+      Promise.resolve(supabase.from('classes').insert({
         id, user_id: user.id, name: c.name, description: c.schedule, week_days: c.days, notes: c.observations, status: c.status
-      }).then(({ error }) => {
+      })).then(({ error }) => {
         if (error) {
           console.error('[Supabase] Erro ao cadastrar turma:', error);
           alert(`Erro ao salvar turma: ${error.message}`);
@@ -557,7 +668,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if(c.days !== undefined) up.week_days = c.days;
       if(c.observations !== undefined) up.notes = c.observations;
       if(c.status !== undefined) up.status = c.status;
-      supabase.from('classes').update(up).eq('id', id).then(({ error }) => {
+      Promise.resolve(supabase.from('classes').update(up).eq('id', id)).then(({ error }) => {
         if (error) {
           console.error('[Supabase] Erro ao atualizar turma:', error);
           alert(`Erro ao atualizar turma: ${error.message}`);
@@ -573,7 +684,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setClasses(prev => prev.filter(item => item.id !== id));
     setStudents(prev => prev.map(s => s.classId === id ? { ...s, classId: undefined } : s));
     if (user) {
-      supabase.from('classes').delete().eq('id', id).then(({ error }) => {
+      Promise.resolve(supabase.from('classes').delete().eq('id', id)).then(({ error }) => {
         if (error) {
           console.error('[Supabase] Erro ao excluir turma:', error);
           alert(`Erro ao excluir turma: ${error.message}`);
@@ -620,6 +731,174 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (user && target) supabase.from('payments').update({ status: target.status }).eq('id', id).then();
       return updated;
     });
+  };
+
+  // ----- FINANCIAL ENTRIES -----
+  const addFinancialEntry = (e: Omit<FinancialEntry, 'id' | 'createdAt'>) => {
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const newItem: FinancialEntry = { ...e, id, createdAt: now };
+    setFinancialEntries(prev => [...prev, newItem]);
+    if (user) {
+      supabase.from('financial_entries').insert({
+        id, user_id: user.id,
+        description: e.description,
+        amount: e.amount,
+        date: e.date,
+        category: e.category,
+        payment_method: e.paymentMethod,
+        status: e.status,
+        notes: e.notes || null,
+      }).then(({ error }) => {
+        if (error) {
+          console.error('[Supabase] Erro ao salvar entrada financeira:', error);
+          setFinancialEntries(prev => prev.filter(i => i.id !== id));
+        }
+      });
+    }
+    return id;
+  };
+
+  const updateFinancialEntry = (id: string, e: Partial<FinancialEntry>) => {
+    setFinancialEntries(prev => prev.map(item => item.id === id ? { ...item, ...e } : item));
+    if (user) {
+      const up: any = {};
+      if (e.description !== undefined) up.description = e.description;
+      if (e.amount !== undefined) up.amount = e.amount;
+      if (e.date !== undefined) up.date = e.date;
+      if (e.category !== undefined) up.category = e.category;
+      if (e.paymentMethod !== undefined) up.payment_method = e.paymentMethod;
+      if (e.status !== undefined) up.status = e.status;
+      if (e.notes !== undefined) up.notes = e.notes || null;
+      supabase.from('financial_entries').update(up).eq('id', id).then(({ error }) => {
+        if (error) console.error('[Supabase] Erro ao atualizar entrada financeira:', error);
+      });
+    }
+  };
+
+  const deleteFinancialEntry = (id: string) => {
+    const backup = financialEntries.find(i => i.id === id);
+    setFinancialEntries(prev => prev.filter(i => i.id !== id));
+    if (user) {
+      supabase.from('financial_entries').delete().eq('id', id).then(({ error }) => {
+        if (error) {
+          console.error('[Supabase] Erro ao excluir entrada financeira:', error);
+          if (backup) setFinancialEntries(prev => [...prev, backup]);
+        }
+      });
+    }
+  };
+
+  // ----- FINANCIAL EXPENSES -----
+  const addFinancialExpense = (e: Omit<FinancialExpense, 'id' | 'createdAt'>) => {
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const newItem: FinancialExpense = { ...e, id, createdAt: now };
+    setFinancialExpenses(prev => [...prev, newItem]);
+    if (user) {
+      supabase.from('financial_expenses').insert({
+        id, user_id: user.id,
+        description: e.description,
+        amount: e.amount,
+        date: e.date,
+        category: e.category,
+        payment_method: e.paymentMethod,
+        status: e.status,
+        notes: e.notes || null,
+      }).then(({ error }) => {
+        if (error) {
+          console.error('[Supabase] Erro ao salvar despesa:', error);
+          setFinancialExpenses(prev => prev.filter(i => i.id !== id));
+        }
+      });
+    }
+    return id;
+  };
+
+  const updateFinancialExpense = (id: string, e: Partial<FinancialExpense>) => {
+    setFinancialExpenses(prev => prev.map(item => item.id === id ? { ...item, ...e } : item));
+    if (user) {
+      const up: any = {};
+      if (e.description !== undefined) up.description = e.description;
+      if (e.amount !== undefined) up.amount = e.amount;
+      if (e.date !== undefined) up.date = e.date;
+      if (e.category !== undefined) up.category = e.category;
+      if (e.paymentMethod !== undefined) up.payment_method = e.paymentMethod;
+      if (e.status !== undefined) up.status = e.status;
+      if (e.notes !== undefined) up.notes = e.notes || null;
+      supabase.from('financial_expenses').update(up).eq('id', id).then(({ error }) => {
+        if (error) console.error('[Supabase] Erro ao atualizar despesa:', error);
+      });
+    }
+  };
+
+  const deleteFinancialExpense = (id: string) => {
+    const backup = financialExpenses.find(i => i.id === id);
+    setFinancialExpenses(prev => prev.filter(i => i.id !== id));
+    if (user) {
+      supabase.from('financial_expenses').delete().eq('id', id).then(({ error }) => {
+        if (error) {
+          console.error('[Supabase] Erro ao excluir despesa:', error);
+          if (backup) setFinancialExpenses(prev => [...prev, backup]);
+        }
+      });
+    }
+  };
+
+  // ----- ACCOUNTS PAYABLE -----
+  const addAccountPayable = (a: Omit<AccountPayable, 'id' | 'createdAt'>) => {
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const newItem: AccountPayable = { ...a, id, createdAt: now };
+    setAccountsPayable(prev => [...prev, newItem]);
+    if (user) {
+      supabase.from('accounts_payable').insert({
+        id, user_id: user.id,
+        description: a.description,
+        amount: a.amount,
+        due_date: a.dueDate,
+        paid_at: a.paidAt || null,
+        category: a.category,
+        status: a.status,
+        notes: a.notes || null,
+      }).then(({ error }) => {
+        if (error) {
+          console.error('[Supabase] Erro ao salvar conta a pagar:', error);
+          setAccountsPayable(prev => prev.filter(i => i.id !== id));
+        }
+      });
+    }
+    return id;
+  };
+
+  const updateAccountPayable = (id: string, a: Partial<AccountPayable>) => {
+    setAccountsPayable(prev => prev.map(item => item.id === id ? { ...item, ...a } : item));
+    if (user) {
+      const up: any = {};
+      if (a.description !== undefined) up.description = a.description;
+      if (a.amount !== undefined) up.amount = a.amount;
+      if (a.dueDate !== undefined) up.due_date = a.dueDate;
+      if (a.paidAt !== undefined) up.paid_at = a.paidAt || null;
+      if (a.category !== undefined) up.category = a.category;
+      if (a.status !== undefined) up.status = a.status;
+      if (a.notes !== undefined) up.notes = a.notes || null;
+      supabase.from('accounts_payable').update(up).eq('id', id).then(({ error }) => {
+        if (error) console.error('[Supabase] Erro ao atualizar conta a pagar:', error);
+      });
+    }
+  };
+
+  const deleteAccountPayable = (id: string) => {
+    const backup = accountsPayable.find(i => i.id === id);
+    setAccountsPayable(prev => prev.filter(i => i.id !== id));
+    if (user) {
+      supabase.from('accounts_payable').delete().eq('id', id).then(({ error }) => {
+        if (error) {
+          console.error('[Supabase] Erro ao excluir conta a pagar:', error);
+          if (backup) setAccountsPayable(prev => [...prev, backup]);
+        }
+      });
+    }
   };
 
   const addGrade = (g: Omit<StudentGrade, 'id'>) => {
@@ -693,7 +972,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const payload = {
       user_id: user.id,
       enabled: data.enabled ?? false,
-      reminder_time: data.reminder_time || '08:00',
+      reminder_time: data.reminder_time || '08:00:00',
+      days_before: data.days_before ?? 3,
       message_template: data.message_template,
     };
 
@@ -819,6 +1099,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   return (
     <AppContext.Provider value={{
       isInitializing, user, students, guardians, classes, payments, grades,
+      financialEntries, financialExpenses, accountsPayable,
       whatsappConnection, whatsappSettings, whatsappLogs,
       login, register, logout, updateUser, setPaid,
       addStudent, updateStudent, deleteStudent,
@@ -826,6 +1107,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       addClass, updateClass, deleteClass,
       addPayment, updatePayment, deletePayment, togglePaymentStatus,
       addGrade, deleteGrade,
+      addFinancialEntry, updateFinancialEntry, deleteFinancialEntry,
+      addFinancialExpense, updateFinancialExpense, deleteFinancialExpense,
+      addAccountPayable, updateAccountPayable, deleteAccountPayable,
       saveWhatsAppConnection, disconnectWhatsApp, saveWhatsAppSettings,
       sendTestWhatsAppMessage, sendManualPaymentReminder, processPaymentRemindersNow, refreshWhatsAppLogs,
       clearData

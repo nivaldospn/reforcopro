@@ -39,6 +39,17 @@ function formatReminderMessage(
   return formatted;
 }
 
+/**
+ * POST /api/whatsapp/process-reminders
+ *
+ * Chamado manualmente pelo professor (botão na UI de Configurações).
+ * Para chamada automática (cron), use GET /api/cron/payment-reminders.
+ *
+ * Lógica: busca mensalidades pendentes cujo vencimento = hoje + days_before (padrão 3 dias).
+ * Ex: hoje = 17/09 → busca mensalidades com due_date = 20/09.
+ *
+ * FIX (v2): corrigido bug onde buscava mensalidades vencendo HOJE em vez de em N dias.
+ */
 export async function POST(req: Request) {
   try {
     const authHeader = req.headers.get('Authorization');
@@ -62,13 +73,12 @@ export async function POST(req: Request) {
 
     // 1. Data atual no fuso de Brasília (America/Sao_Paulo)
     const nowSP = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
-    const yyyy = nowSP.getFullYear();
-    const mm = String(nowSP.getMonth() + 1).padStart(2, '0');
-    const dd = String(nowSP.getDate()).padStart(2, '0');
-    const todayStr = `${yyyy}-${mm}-${dd}`;
-    const todayFormattedBR = `${dd}/${mm}/${yyyy}`;
+    const todayYYYY = nowSP.getFullYear();
+    const todayMM = String(nowSP.getMonth() + 1).padStart(2, '0');
+    const todayDD = String(nowSP.getDate()).padStart(2, '0');
+    const todayStr = `${todayYYYY}-${todayMM}-${todayDD}`;
 
-    console.log(`[Reminders Process] Iniciando processamento para ${user.id} em ${todayStr} (America/Sao_Paulo)`);
+    console.log(`[Reminders Process] Usuário ${user.id} — data atual SP: ${todayStr}`);
 
     // 2. Buscar configurações de lembrete do professor
     const { data: settings } = await userClient
@@ -80,12 +90,25 @@ export async function POST(req: Request) {
     if (!settings || !settings.enabled) {
       return NextResponse.json({
         success: true,
-        message: 'Lembretes automáticos desativados nas configurações.',
+        message: 'Cobranças automáticas desativadas nas configurações.',
         stats: { found: 0, sent: 0, ignored: 0, failed: 0 }
       });
     }
 
-    // 3. Buscar conexão Datafy do professor
+    // 3. Calcular a data alvo: hoje + days_before dias (padrão 3)
+    // FIX: anteriormente usava todayStr (dia do vencimento), agora usa data futura correta.
+    const daysBefore = settings.days_before ?? 3;
+    const targetDate = new Date(nowSP);
+    targetDate.setDate(targetDate.getDate() + daysBefore);
+    const targetYYYY = targetDate.getFullYear();
+    const targetMM = String(targetDate.getMonth() + 1).padStart(2, '0');
+    const targetDD = String(targetDate.getDate()).padStart(2, '0');
+    const targetDateStr = `${targetYYYY}-${targetMM}-${targetDD}`; // ex: "2026-09-20"
+    const targetDateBR = `${targetDD}/${targetMM}/${targetYYYY}`; // ex: "20/09/2026"
+
+    console.log(`[Reminders Process] Buscando mensalidades com vencimento em ${targetDateStr} (${daysBefore} dias a partir de hoje ${todayStr})`);
+
+    // 4. Buscar conexão Datafy do professor
     const { data: connection } = await userClient
       .from('whatsapp_connections')
       .select('*')
@@ -102,9 +125,17 @@ export async function POST(req: Request) {
       }, { status: 400 });
     }
 
-    const effectiveToken = connection.api_token_encrypted || datafyToken;
+    // Token: usa variável de ambiente (recomendado) como fallback
+    const effectiveToken = datafyToken || connection.api_token_encrypted;
+    if (!effectiveToken) {
+      return NextResponse.json({
+        success: false,
+        error: 'Token da Datafy API não configurado. Adicione DATAFY_API_TOKEN nas variáveis de ambiente.',
+        stats: { found: 0, sent: 0, ignored: 0, failed: 0 }
+      }, { status: 500 });
+    }
 
-    // 4. Buscar mensalidades pendentes vencendo HOJE
+    // 5. Buscar mensalidades PENDENTES com due_date = targetDateStr
     const { data: payments, error: payErr } = await userClient
       .from('payments')
       .select(`
@@ -119,7 +150,7 @@ export async function POST(req: Request) {
       `)
       .eq('user_id', user.id)
       .eq('status', 'pending')
-      .eq('due_date', todayStr);
+      .eq('due_date', targetDateStr);  // FIX: data do vencimento, não de hoje
 
     if (payErr) {
       return NextResponse.json({ error: payErr.message }, { status: 500 });
@@ -131,24 +162,29 @@ export async function POST(req: Request) {
     let failedCount = 0;
     const logs: any[] = [];
 
+    console.log(`[Reminders Process] Encontradas ${totalFound} mensalidade(s) com vencimento em ${targetDateStr}`);
+
     for (const payment of (payments || [])) {
-      // 5. Verificar anti-duplicidade: já foi enviado hoje?
+      // 6. Verificar anti-duplicidade: já foi enviado lembrete automático para ESTA mensalidade?
+      // (não apenas hoje — evita reenvio em qualquer circunstância)
       const { data: existingLog } = await userClient
         .from('whatsapp_message_logs')
-        .select('id, status')
+        .select('id, status, created_at')
         .eq('mensalidade_id', payment.id)
         .eq('message_type', 'payment_reminder')
-        .neq('status', 'failed')
-        .gte('created_at', `${todayStr}T00:00:00.000Z`)
+        .in('status', ['sent', 'delivered', 'read']) // só bloqueia se foi enviada com sucesso
         .maybeSingle();
 
       if (existingLog) {
         ignoredCount++;
-        logs.push({ paymentId: payment.id, reason: 'Mensagem já enviada hoje para esta mensalidade' });
+        logs.push({
+          paymentId: payment.id,
+          reason: `Cobrança automática já enviada anteriormente (log ${existingLog.id}, status: ${existingLog.status})`
+        });
         continue;
       }
 
-      // 6. Obter Aluno e Responsável
+      // 7. Obter Aluno e Responsável
       const student: any = payment.students;
       let guardian: any = payment.guardians;
 
@@ -167,27 +203,34 @@ export async function POST(req: Request) {
         continue;
       }
 
+      // 8. Validar WhatsApp do responsável (usa campo whatsapp, não phone)
       const rawPhone = guardian.whatsapp || guardian.phone;
+      if (!rawPhone) {
+        ignoredCount++;
+        logs.push({ paymentId: payment.id, reason: 'Responsável sem WhatsApp cadastrado.' });
+        continue;
+      }
+
       const normalizedPhone = normalizeBrazilianPhone(rawPhone);
 
       if (!isValidBrazilianPhone(normalizedPhone)) {
         ignoredCount++;
-        logs.push({ paymentId: payment.id, reason: `Telefone inválido ou ausente: ${rawPhone}` });
+        logs.push({ paymentId: payment.id, reason: `Número de WhatsApp inválido: ${rawPhone}` });
         continue;
       }
 
-      // 7. Montar mensagem formatada
+      // 9. Montar mensagem com variáveis substituídas
       const formattedAmount = Number(payment.amount).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
       const messageBody = formatReminderMessage(settings.message_template, {
         responsavel: guardian.full_name.split(' ')[0],
         aluno: student?.full_name || 'Aluno',
         valor: formattedAmount,
-        vencimento: todayFormattedBR,
-        turma: student?.classes?.name || 'Turma',
+        vencimento: targetDateBR,
+        turma: student?.classes?.name || '',
         nome_escola: connection.display_name || 'Reforço Pro',
       });
 
-      // 8. Inserir log inicial pendente
+      // 10. Inserir log inicial com status 'pending' ANTES de enviar
       const { data: logEntry } = await userClient
         .from('whatsapp_message_logs')
         .insert({
@@ -205,9 +248,11 @@ export async function POST(req: Request) {
         .select()
         .single();
 
-      // 9. Disparo via Datafy API
+      // 11. Disparar via Datafy API
       try {
         const apiUrl = `${datafyBaseUrl}/${connection.phone_number_id}/messages`;
+        console.log(`[Datafy] Enviando para ${normalizedPhone} via ${apiUrl}`);
+
         const res = await fetch(apiUrl, {
           method: 'POST',
           headers: {
@@ -224,6 +269,7 @@ export async function POST(req: Request) {
         });
 
         const sendData = await res.json().catch(() => ({}));
+        console.log(`[Datafy Response] Status: ${res.status}`, JSON.stringify(sendData).substring(0, 200));
 
         if (res.ok) {
           sentCount++;
@@ -233,15 +279,16 @@ export async function POST(req: Request) {
               .from('whatsapp_message_logs')
               .update({
                 status: 'sent',
-                provider_message_id: providerMsgId,
+                provider_message_id: providerMsgId || null,
                 sent_at: new Date().toISOString(),
               })
               .eq('id', logEntry.id);
           }
-          logs.push({ paymentId: payment.id, status: 'sent', phone: normalizedPhone });
+          logs.push({ paymentId: payment.id, status: 'sent', phone: normalizedPhone, messageId: providerMsgId });
         } else {
           failedCount++;
-          const errorMsg = sendData?.error?.message || `Erro HTTP ${res.status}`;
+          const errorMsg = sendData?.error?.message || sendData?.message || `Erro HTTP ${res.status} da Datafy`;
+          // NÃO marcar como enviada em caso de falha — permite nova tentativa
           if (logEntry) {
             await userClient
               .from('whatsapp_message_logs')
@@ -252,18 +299,23 @@ export async function POST(req: Request) {
         }
       } catch (err: any) {
         failedCount++;
+        const errorMsg = err.message || 'Falha de conexão com a Datafy';
         if (logEntry) {
           await userClient
             .from('whatsapp_message_logs')
-            .update({ status: 'failed', error_message: err.message || 'Falha de conexão' })
+            .update({ status: 'failed', error_message: errorMsg })
             .eq('id', logEntry.id);
         }
-        logs.push({ paymentId: payment.id, status: 'failed', error: err.message });
+        logs.push({ paymentId: payment.id, status: 'failed', error: errorMsg });
       }
     }
 
+    console.log(`[Reminders Process] Concluído: encontradas=${totalFound} enviadas=${sentCount} ignoradas=${ignoredCount} falhas=${failedCount}`);
+
     return NextResponse.json({
       success: true,
+      targetDate: targetDateStr,
+      daysBefore,
       stats: {
         found: totalFound,
         sent: sentCount,

@@ -56,13 +56,50 @@ export async function POST(req: Request) {
       .eq('provider', 'datafy')
       .maybeSingle();
 
-    if (connErr || !connection || connection.status !== 'connected' || !connection.phone_number_id) {
+    if (connErr || !connection || connection.status !== 'connected') {
       return NextResponse.json({ error: 'WhatsApp não conectado. Conecte seu WhatsApp nas Configurações.' }, { status: 400 });
     }
 
     const effectiveToken = connection.api_token_encrypted || datafyToken;
 
-    // Inserir log inicial
+    // Validação explícita: token DEVE existir antes de prosseguir
+    if (!effectiveToken) {
+      return NextResponse.json({
+        error: 'DATAFY_API_TOKEN não configurado no servidor. Adicione essa variável ao .env.local (desenvolvimento) ou nas Environment Variables do Vercel (produção) e reinicie o servidor.'
+      }, { status: 500 });
+    }
+
+    // Auto-healing: se phone_number_id estiver nulo no banco, busca na Datafy via GET /me
+    let phoneNumberId = connection.phone_number_id;
+    if (!phoneNumberId) {
+      console.log('[Datafy] phone_number_id ausente no banco — consultando GET /me para auto-healing...');
+      try {
+        const meRes = await fetch('https://cloud.datafyapi.com.br/me', {
+          headers: { Authorization: `Bearer ${effectiveToken}` },
+        });
+        if (meRes.ok) {
+          const meData = await meRes.json();
+          phoneNumberId = meData?.phone_number_id || null;
+          if (phoneNumberId) {
+            console.log(`[Datafy] Auto-healing: phone_number_id recuperado = ${phoneNumberId}`);
+            // Atualiza o banco com o valor correto para próximas chamadas
+            await userClient
+              .from('whatsapp_connections')
+              .update({ phone_number_id: phoneNumberId })
+              .eq('id', connection.id);
+          }
+        }
+      } catch (e) {
+        console.warn('[Datafy] Falha no auto-healing GET /me:', e);
+      }
+    }
+
+    if (!phoneNumberId) {
+      return NextResponse.json({
+        error: 'Phone Number ID não configurado. Acesse as Configurações do WhatsApp e reconecte seu número.'
+      }, { status: 400 });
+    }
+
     const { data: logEntry } = await userClient
       .from('whatsapp_message_logs')
       .insert({
@@ -81,8 +118,9 @@ export async function POST(req: Request) {
       .single();
 
     // Disparar via Datafy API (tentativa texto livre ou template)
-    const apiUrl = `${datafyBaseUrl}/${connection.phone_number_id}/messages`;
+    const apiUrl = `${datafyBaseUrl}/${phoneNumberId}/messages`;
     console.log(`[Datafy] Enviando para ${apiUrl} -> Destino: ${normalizedPhone}`);
+
 
     // Montar payload de texto
     const textPayload = {

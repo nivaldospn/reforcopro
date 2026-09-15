@@ -8,7 +8,7 @@ import {
   Users, 
   UserSquare2, 
   BookOpen, 
-  CreditCard, 
+  Wallet, 
   LogOut, 
   Sun, 
   Moon,
@@ -38,7 +38,7 @@ export function Layout({ children, title, showBackButton }: LayoutProps) {
     { icon: Users, label: 'Alunos', shortLabel: 'Alunos', href: '/students' },
     { icon: UserSquare2, label: 'Responsáveis', shortLabel: 'Pais', href: '/guardians' },
     { icon: BookOpen, label: 'Turmas', shortLabel: 'Turmas', href: '/classes' },
-    { icon: CreditCard, label: 'Pagamentos', shortLabel: 'Pagos', href: '/payments' },
+    { icon: Wallet, label: 'Financeiro', shortLabel: 'Financ', href: '/payments' },
     { icon: Settings, label: 'Configurações', shortLabel: 'Ajustes', href: '/settings' },
   ];
 

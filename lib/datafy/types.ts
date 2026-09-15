@@ -20,6 +20,7 @@ export interface WhatsAppSettings {
   user_id: string;
   enabled: boolean;
   reminder_time: string;
+  days_before: number; // quantos dias antes do vencimento enviar (padrão: 3)
   message_template: string;
   created_at: string;
   updated_at: string;

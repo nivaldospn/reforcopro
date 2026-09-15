@@ -83,7 +83,8 @@ export default function SettingsPage() {
   const [waSettingsForm, setWaSettingsForm] = useState({
     enabled: false,
     reminder_time: '08:00',
-    message_template: `Olá, {responsavel}! 😊\n\nPassando para lembrar que a mensalidade do aluno {aluno} vence hoje.\n\nValor: {valor}\nVencimento: {vencimento}\n\nObrigado!`
+    days_before: 3,
+    message_template: `Olá, {responsavel}! 😊\n\nPassando para lembrar que a mensalidade do aluno {aluno}, no valor de {valor}, vence no dia {vencimento}.\n\nCaso já tenha realizado o pagamento, desconsidere esta mensagem. 😊\n\nObrigado!`
   });
 
   // Manual Connection Modal Form (Embedded / Datafy Credentials)
@@ -114,6 +115,7 @@ export default function SettingsPage() {
       setWaSettingsForm({
         enabled: whatsappSettings.enabled,
         reminder_time: whatsappSettings.reminder_time?.substring(0, 5) || '08:00',
+        days_before: whatsappSettings.days_before ?? 3,
         message_template: whatsappSettings.message_template
       });
     }
@@ -573,8 +575,28 @@ export default function SettingsPage() {
                         </label>
                       </div>
 
-                      {/* Horário de envio */}
+                      {/* Dias antes do vencimento + Horário de envio */}
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                        <div className="space-y-2">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Enviar Cobrança Quantos Dias Antes?</label>
+                          <div className="flex items-center gap-3">
+                            <input
+                              type="number"
+                              min={1}
+                              max={30}
+                              value={waSettingsForm.days_before}
+                              onChange={(e) => setWaSettingsForm({ ...waSettingsForm, days_before: Math.max(1, Math.min(30, Number(e.target.value))) })}
+                              className="w-24 px-4 py-3.5 bg-slate-50 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-700/60 rounded-xl font-black text-slate-900 dark:text-white text-lg text-center outline-none focus:border-blue-500"
+                            />
+                            <span className="text-sm font-bold text-slate-600 dark:text-slate-300">
+                              {waSettingsForm.days_before === 1 ? 'dia antes do vencimento' : 'dias antes do vencimento'}
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-400">
+                            Ex: vencimento 20/09 → envio em {(() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })); d.setDate(d.getDate() + waSettingsForm.days_before); return new Intl.DateTimeFormat('pt-BR').format(d); })()}
+                          </span>
+                        </div>
+
                         <div className="space-y-2">
                           <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Horário do Envio Diário</label>
                           <div className="relative max-w-xs">
@@ -604,7 +626,7 @@ export default function SettingsPage() {
                               type="button"
                               onClick={() => setWaSettingsForm({
                                 ...waSettingsForm,
-                                message_template: `Olá, {responsavel}! 😊\n\nPassando para lembrar que a mensalidade do aluno {aluno} vence hoje.\n\n💰 *Valor:* {valor}\n📅 *Vencimento:* {vencimento}\n🔑 *Chave PIX:* seu-pix-aqui\n\nPor gentileza, após realizar o pagamento, envie o comprovante por aqui.\n\nObrigado! 💙`
+                                message_template: `Olá, {responsavel}! 😊\n\nPassando para lembrar que a mensalidade do aluno {aluno}, no valor de {valor}, vence no dia {vencimento}.\n\n💰 *Chave PIX:* seu-pix-aqui\n\nApós realizar o pagamento, envie o comprovante por aqui.\n\nObrigado! 💙`
                               })}
                               className="px-3 py-1.5 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 rounded-xl text-xs font-bold hover:bg-emerald-100 transition-all flex items-center gap-1.5"
                             >
@@ -615,7 +637,7 @@ export default function SettingsPage() {
                               type="button"
                               onClick={() => setWaSettingsForm({
                                 ...waSettingsForm,
-                                message_template: `Olá, {responsavel}! 😊\n\nPassando para lembrar que a mensalidade do aluno {aluno} vence hoje.\n\nValor: {valor}\nVencimento: {vencimento}\n\nPara evitar atrasos, pedimos que realize o pagamento da mensalidade.\n\nObrigado! 💙`
+                                message_template: `Olá, {responsavel}! 😊\n\nPassando para lembrar que a mensalidade do aluno {aluno}, no valor de {valor}, vence no dia {vencimento}.\n\nCaso já tenha realizado o pagamento, desconsidere esta mensagem.\n\nObrigado! 💙`
                               })}
                               className="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-xl text-xs font-bold hover:bg-slate-200 transition-all"
                             >
@@ -679,14 +701,18 @@ export default function SettingsPage() {
                                   .replace(/{responsavel}/g, 'Maria Silva')
                                   .replace(/{aluno}/g, 'João Silva')
                                   .replace(/{valor}/g, 'R$ 150,00')
-                                  .replace(/{vencimento}/g, new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date()))
+                                  .replace(/{vencimento}/g, (() => {
+                                    const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+                                    d.setDate(d.getDate() + waSettingsForm.days_before);
+                                    return new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(d);
+                                  })())
                                   .replace(/{turma}/g, 'Matemática 5º Ano')
                                   .replace(/{nome_escola}/g, whatsappConnection?.display_name || user?.name || 'Reforço Pro')
                                   .replace(/{chave_pix}/g, 'pix@reforcopro.com')
                                   .replace(/{pix}/g, 'pix@reforcopro.com')}
                               </div>
                               <div className="text-right text-[10px] text-slate-500 dark:text-slate-400 font-bold pt-2">
-                                08:00 ✓✓
+                                {waSettingsForm.reminder_time} ✓✓
                               </div>
                             </div>
                           </div>
@@ -730,6 +756,7 @@ export default function SettingsPage() {
                               await saveWhatsAppSettings({
                                 enabled: waSettingsForm.enabled,
                                 reminder_time: waSettingsForm.reminder_time + ':00',
+                                days_before: waSettingsForm.days_before,
                                 message_template: waSettingsForm.message_template
                               });
                               setWaSettingsStatus('success');
@@ -755,10 +782,12 @@ export default function SettingsPage() {
                           <div>
                             <h3 className="text-base font-black text-slate-900 dark:text-white flex items-center gap-2">
                               <Sparkles size={18} className="text-purple-600 dark:text-purple-400" />
-                              Executar Processamento de Lembretes Agora (Admin / Teste)
+                              Processar Cobranças Agora (Teste Manual)
                             </h3>
                             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                              Busca e despacha os lembretes para todas as mensalidades que vencem hoje ({new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date())}), respeitando as regras de anti-duplicidade.
+                              Busca mensalidades com vencimento em {waSettingsForm.days_before} {waSettingsForm.days_before === 1 ? 'dia' : 'dias'} (
+                              {(() => { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })); d.setDate(d.getDate() + waSettingsForm.days_before); return new Intl.DateTimeFormat('pt-BR').format(d); })()
+                              }) e envia cobranças, respeitando anti-duplicidade.
                             </p>
                           </div>
 
