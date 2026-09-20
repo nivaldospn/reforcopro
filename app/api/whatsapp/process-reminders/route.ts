@@ -1,19 +1,14 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-
-function normalizeBrazilianPhone(phone: string): string {
-  if (!phone) return '';
-  let clean = phone.replace(/\D/g, '');
-  if (clean.startsWith('0')) clean = clean.substring(1);
-  if (!clean.startsWith('55') && (clean.length === 10 || clean.length === 11)) {
-    clean = '55' + clean;
-  }
-  return clean;
-}
-
-function isValidBrazilianPhone(normalizedPhone: string): boolean {
-  return /^55[1-9]{2}9?[0-9]{8}$/.test(normalizedPhone);
-}
+import {
+  normalizeBrazilianPhone,
+  isValidBrazilianPhone,
+  getMetaWhatsAppConfig,
+  sendMetaWhatsAppText,
+  sendMetaWhatsAppTemplate,
+  META_DEFAULT_PAYMENT_TEMPLATE,
+  extractPixKeyFromMessageTemplate,
+} from '@/lib/whatsapp/meta-client';
 
 function formatReminderMessage(
   template: string,
@@ -47,8 +42,6 @@ function formatReminderMessage(
  *
  * Lógica: busca mensalidades pendentes cujo vencimento = hoje + days_before (padrão 3 dias).
  * Ex: hoje = 17/09 → busca mensalidades com due_date = 20/09.
- *
- * FIX (v2): corrigido bug onde buscava mensalidades vencendo HOJE em vez de em N dias.
  */
 export async function POST(req: Request) {
   try {
@@ -59,8 +52,6 @@ export async function POST(req: Request) {
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-    const datafyToken = process.env.DATAFY_API_TOKEN || '';
-    const datafyBaseUrl = (process.env.DATAFY_API_BASE_URL || 'https://cloud.datafyapi.com.br/v1').replace(/\/$/, '');
 
     const userClient = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },
@@ -96,43 +87,38 @@ export async function POST(req: Request) {
     }
 
     // 3. Calcular a data alvo: hoje + days_before dias (padrão 3)
-    // FIX: anteriormente usava todayStr (dia do vencimento), agora usa data futura correta.
     const daysBefore = settings.days_before ?? 3;
     const targetDate = new Date(nowSP);
     targetDate.setDate(targetDate.getDate() + daysBefore);
     const targetYYYY = targetDate.getFullYear();
     const targetMM = String(targetDate.getMonth() + 1).padStart(2, '0');
     const targetDD = String(targetDate.getDate()).padStart(2, '0');
-    const targetDateStr = `${targetYYYY}-${targetMM}-${targetDD}`; // ex: "2026-09-20"
-    const targetDateBR = `${targetDD}/${targetMM}/${targetYYYY}`; // ex: "20/09/2026"
+    const targetDateStr = `${targetYYYY}-${targetMM}-${targetDD}`;
+    const targetDateBR = `${targetDD}/${targetMM}/${targetYYYY}`;
 
     console.log(`[Reminders Process] Buscando mensalidades com vencimento em ${targetDateStr} (${daysBefore} dias a partir de hoje ${todayStr})`);
 
-    // 4. Buscar conexão Datafy do professor
+    // 4. Buscar conexão do professor (prioridade: meta, fallback: datafy)
     const { data: connection } = await userClient
       .from('whatsapp_connections')
       .select('*')
       .eq('user_id', user.id)
-      .eq('provider', 'datafy')
-      .eq('status', 'connected')
+      .in('provider', ['meta', 'datafy'])
+      .order('created_at', { ascending: false })
+      .limit(1)
       .maybeSingle();
 
-    if (!connection || !connection.phone_number_id) {
+    const metaConfig = getMetaWhatsAppConfig();
+    const isMetaActive = metaConfig.isConfigured;
+    const chosenProvider = isMetaActive ? 'meta' : 'datafy';
+
+    // Se Meta não estiver configurada e não houver conexão Datafy válida
+    if (!isMetaActive && (!connection || connection.status !== 'connected' || !connection.phone_number_id)) {
       return NextResponse.json({
         success: false,
-        error: 'WhatsApp não conectado. Conecte o WhatsApp nas configurações.',
+        error: 'WhatsApp não configurado. Adicione WHATSAPP_ACCESS_TOKEN e WHATSAPP_PHONE_NUMBER_ID nas variáveis de ambiente.',
         stats: { found: 0, sent: 0, ignored: 0, failed: 0 }
       }, { status: 400 });
-    }
-
-    // Token: usa variável de ambiente (recomendado) como fallback
-    const effectiveToken = datafyToken || connection.api_token_encrypted;
-    if (!effectiveToken) {
-      return NextResponse.json({
-        success: false,
-        error: 'Token da Datafy API não configurado. Adicione DATAFY_API_TOKEN nas variáveis de ambiente.',
-        stats: { found: 0, sent: 0, ignored: 0, failed: 0 }
-      }, { status: 500 });
     }
 
     // 5. Buscar mensalidades PENDENTES com due_date = targetDateStr
@@ -150,7 +136,7 @@ export async function POST(req: Request) {
       `)
       .eq('user_id', user.id)
       .eq('status', 'pending')
-      .eq('due_date', targetDateStr);  // FIX: data do vencimento, não de hoje
+      .eq('due_date', targetDateStr);
 
     if (payErr) {
       return NextResponse.json({ error: payErr.message }, { status: 500 });
@@ -164,22 +150,24 @@ export async function POST(req: Request) {
 
     console.log(`[Reminders Process] Encontradas ${totalFound} mensalidade(s) com vencimento em ${targetDateStr}`);
 
+    // Template oficial configurável para cobranças (opcional via env, padrão 'lembrete_mensalidade')
+    const configuredTemplateName = process.env.WHATSAPP_PAYMENT_REMINDER_TEMPLATE || '';
+
     for (const payment of (payments || [])) {
-      // 6. Verificar anti-duplicidade: já foi enviado lembrete automático para ESTA mensalidade?
-      // (não apenas hoje — evita reenvio em qualquer circunstância)
+      // 6. Anti-duplicidade: verificar se já foi enviado com sucesso para esta mensalidade
       const { data: existingLog } = await userClient
         .from('whatsapp_message_logs')
         .select('id, status, created_at')
         .eq('mensalidade_id', payment.id)
         .eq('message_type', 'payment_reminder')
-        .in('status', ['sent', 'delivered', 'read']) // só bloqueia se foi enviada com sucesso
+        .in('status', ['sent', 'delivered', 'read'])
         .maybeSingle();
 
       if (existingLog) {
         ignoredCount++;
         logs.push({
           paymentId: payment.id,
-          reason: `Cobrança automática já enviada anteriormente (log ${existingLog.id}, status: ${existingLog.status})`
+          reason: `Cobrança já enviada anteriormente (log ${existingLog.id}, status: ${existingLog.status})`
         });
         continue;
       }
@@ -203,7 +191,7 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 8. Validar WhatsApp do responsável (usa campo whatsapp, não phone)
+      // 8. Validar WhatsApp do responsável
       const rawPhone = guardian.whatsapp || guardian.phone;
       if (!rawPhone) {
         ignoredCount++;
@@ -212,14 +200,14 @@ export async function POST(req: Request) {
       }
 
       const normalizedPhone = normalizeBrazilianPhone(rawPhone);
-
       if (!isValidBrazilianPhone(normalizedPhone)) {
         ignoredCount++;
         logs.push({ paymentId: payment.id, reason: `Número de WhatsApp inválido: ${rawPhone}` });
         continue;
       }
 
-      // 9. Montar mensagem com variáveis substituídas
+      // 9. Extrair Chave Pix e montar mensagem formatada com as variáveis
+      const extractedPixKey = extractPixKeyFromMessageTemplate(settings.message_template);
       const formattedAmount = Number(payment.amount).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
       const messageBody = formatReminderMessage(settings.message_template, {
         responsavel: guardian.full_name.split(' ')[0],
@@ -227,79 +215,148 @@ export async function POST(req: Request) {
         valor: formattedAmount,
         vencimento: targetDateBR,
         turma: student?.classes?.name || '',
-        nome_escola: connection.display_name || 'Reforço Pro',
+        nome_escola: connection?.display_name || 'Reforço Pro',
+        chave_pix: extractedPixKey,
       });
 
-      // 10. Inserir log inicial com status 'pending' ANTES de enviar
+      // 10. Inserir log inicial como 'pending'
       const { data: logEntry } = await userClient
         .from('whatsapp_message_logs')
         .insert({
           user_id: user.id,
-          whatsapp_connection_id: connection.id,
+          whatsapp_connection_id: connection?.id || null,
           mensalidade_id: payment.id,
           aluno_id: student?.id || null,
           responsavel_id: guardian.id || null,
           phone: normalizedPhone,
           message_type: 'payment_reminder',
           message_content: messageBody,
-          provider: 'datafy',
+          provider: chosenProvider,
           status: 'pending',
         })
         .select()
         .single();
 
-      // 11. Disparar via Datafy API
+      // 11. DISPARO
       try {
-        const apiUrl = `${datafyBaseUrl}/${connection.phone_number_id}/messages`;
-        console.log(`[Datafy] Enviando para ${normalizedPhone} via ${apiUrl}`);
-
-        const res = await fetch(apiUrl, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${effectiveToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
+        if (isMetaActive) {
+          // PROVEDOR META:
+          // Usa o template oficial aprovado 'lembrete_mensalidade' com os 5 parâmetros na ordem:
+          // {{1}} = Responsável | {{2}} = Aluno | {{3}} = Valor | {{4}} = Vencimento | {{5}} = Chave Pix
+          const templateNameToUse = process.env.WHATSAPP_PAYMENT_REMINDER_TEMPLATE || META_DEFAULT_PAYMENT_TEMPLATE;
+          
+          const metaRes = await sendMetaWhatsAppTemplate({
             to: normalizedPhone,
-            type: 'text',
-            text: { preview_url: false, body: messageBody },
-          }),
-        });
+            templateName: templateNameToUse,
+            languageCode: 'pt_BR',
+            components: [
+              {
+                type: 'body',
+                parameters: [
+                  { type: 'text', text: guardian.full_name.split(' ')[0] },
+                  { type: 'text', text: student?.full_name || 'Aluno' },
+                  { type: 'text', text: formattedAmount },
+                  { type: 'text', text: targetDateBR },
+                  { type: 'text', text: extractedPixKey || 'Não informada' },
+                ],
+              },
+            ],
+          });
 
-        const sendData = await res.json().catch(() => ({}));
-        console.log(`[Datafy Response] Status: ${res.status}`, JSON.stringify(sendData).substring(0, 200));
-
-        if (res.ok) {
-          sentCount++;
-          const providerMsgId = sendData?.messages?.[0]?.id || sendData?.id;
-          if (logEntry) {
-            await userClient
-              .from('whatsapp_message_logs')
-              .update({
-                status: 'sent',
-                provider_message_id: providerMsgId || null,
-                sent_at: new Date().toISOString(),
-              })
-              .eq('id', logEntry.id);
+          if (metaRes.success && metaRes.messageId) {
+            sentCount++;
+            if (logEntry) {
+              await userClient
+                .from('whatsapp_message_logs')
+                .update({
+                  status: 'sent',
+                  provider_message_id: metaRes.messageId,
+                  sent_at: new Date().toISOString(),
+                })
+                .eq('id', logEntry.id);
+            }
+            logs.push({ paymentId: payment.id, status: 'sent', phone: normalizedPhone, messageId: metaRes.messageId, provider: 'meta' });
+          } else {
+            failedCount++;
+            let errorMsg = metaRes.error || 'Falha no envio via Meta';
+            if (metaRes.errorCode === 131047 || metaRes.errorCode === 100) {
+              errorMsg = 'A Meta exige um template aprovado para iniciar mensagens fora da janela de 24h. Crie e aprove o template de lembrete no WhatsApp Business Manager.';
+            }
+            if (logEntry) {
+              await userClient
+                .from('whatsapp_message_logs')
+                .update({ status: 'failed', error_message: errorMsg })
+                .eq('id', logEntry.id);
+            }
+            logs.push({ paymentId: payment.id, status: 'failed', error: errorMsg, provider: 'meta' });
           }
-          logs.push({ paymentId: payment.id, status: 'sent', phone: normalizedPhone, messageId: providerMsgId });
         } else {
-          failedCount++;
-          const errorMsg = sendData?.error?.message || sendData?.message || `Erro HTTP ${res.status} da Datafy`;
-          // NÃO marcar como enviada em caso de falha — permite nova tentativa
-          if (logEntry) {
-            await userClient
-              .from('whatsapp_message_logs')
-              .update({ status: 'failed', error_message: errorMsg })
-              .eq('id', logEntry.id);
+          // FALLBACK LEGADO DATAFY
+          const datafyToken = process.env.DATAFY_API_TOKEN || connection?.api_token_encrypted || '';
+          const datafyBaseUrl = (process.env.DATAFY_API_BASE_URL || 'https://cloud.datafyapi.com.br/v1').replace(/\/$/, '');
+          const phoneNumberId = connection?.phone_number_id;
+
+          if (!phoneNumberId) {
+            failedCount++;
+            const errorMsg = 'Phone Number ID não configurado na conexão para envio via Datafy';
+            if (logEntry) {
+              await userClient
+                .from('whatsapp_message_logs')
+                .update({ status: 'failed', error_message: errorMsg })
+                .eq('id', logEntry.id);
+            }
+            logs.push({ paymentId: payment.id, status: 'failed', error: errorMsg, provider: 'datafy' });
+            continue;
           }
-          logs.push({ paymentId: payment.id, status: 'failed', error: errorMsg });
+
+          const apiUrl = `${datafyBaseUrl}/${phoneNumberId}/messages`;
+
+          const res = await fetch(apiUrl, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${datafyToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: normalizedPhone,
+              type: 'text',
+              text: { preview_url: false, body: messageBody },
+            }),
+          });
+
+          const sendData = await res.json().catch(() => ({}));
+
+          if (res.ok) {
+            sentCount++;
+            const providerMsgId = sendData?.messages?.[0]?.id || sendData?.id;
+            if (logEntry) {
+              await userClient
+                .from('whatsapp_message_logs')
+                .update({
+                  status: 'sent',
+                  provider_message_id: providerMsgId || null,
+                  sent_at: new Date().toISOString(),
+                })
+                .eq('id', logEntry.id);
+            }
+            logs.push({ paymentId: payment.id, status: 'sent', phone: normalizedPhone, messageId: providerMsgId, provider: 'datafy' });
+          } else {
+            failedCount++;
+            const errorMsg = sendData?.error?.message || sendData?.message || `Erro HTTP ${res.status} da Datafy`;
+            if (logEntry) {
+              await userClient
+                .from('whatsapp_message_logs')
+                .update({ status: 'failed', error_message: errorMsg })
+                .eq('id', logEntry.id);
+            }
+            logs.push({ paymentId: payment.id, status: 'failed', error: errorMsg, provider: 'datafy' });
+          }
         }
       } catch (err: any) {
         failedCount++;
-        const errorMsg = err.message || 'Falha de conexão com a Datafy';
+        const errorMsg = err.message || 'Falha de conexão com provedor';
         if (logEntry) {
           await userClient
             .from('whatsapp_message_logs')
@@ -314,6 +371,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       success: true,
+      provider: chosenProvider,
       targetDate: targetDateStr,
       daysBefore,
       stats: {

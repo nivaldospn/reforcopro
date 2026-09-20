@@ -1,19 +1,11 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-
-function normalizeBrazilianPhone(phone: string): string {
-  if (!phone) return '';
-  let clean = phone.replace(/\D/g, '');
-  if (clean.startsWith('0')) clean = clean.substring(1);
-  if (!clean.startsWith('55') && (clean.length === 10 || clean.length === 11)) {
-    clean = '55' + clean;
-  }
-  return clean;
-}
-
-function isValidBrazilianPhone(normalizedPhone: string): boolean {
-  return /^55[1-9]{2}9?[0-9]{8}$/.test(normalizedPhone);
-}
+import {
+  normalizeBrazilianPhone,
+  isValidBrazilianPhone,
+  getMetaWhatsAppConfig,
+  sendMetaWhatsAppText,
+} from '@/lib/whatsapp/meta-client';
 
 export async function POST(req: Request) {
   try {
@@ -24,8 +16,6 @@ export async function POST(req: Request) {
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-    const datafyToken = process.env.DATAFY_API_TOKEN || '';
-    const datafyBaseUrl = (process.env.DATAFY_API_BASE_URL || 'https://cloud.datafyapi.com.br/v1').replace(/\/$/, '');
 
     const userClient = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },
@@ -48,155 +38,128 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Número de WhatsApp inválido. Informe o DDD e o número completo.' }, { status: 400 });
     }
 
-    // Buscar a conexão WhatsApp do usuário
-    const { data: connection, error: connErr } = await userClient
+    // Identificar conexão do usuário (prioridade: meta, fallback: datafy)
+    const { data: connection } = await userClient
       .from('whatsapp_connections')
       .select('*')
       .eq('user_id', user.id)
-      .eq('provider', 'datafy')
+      .in('provider', ['meta', 'datafy'])
+      .order('created_at', { ascending: false })
+      .limit(1)
       .maybeSingle();
 
-    if (connErr || !connection || connection.status !== 'connected') {
-      return NextResponse.json({ error: 'WhatsApp não conectado. Conecte seu WhatsApp nas Configurações.' }, { status: 400 });
-    }
+    const metaConfig = getMetaWhatsAppConfig();
+    const isMetaActive = metaConfig.isConfigured;
 
-    const effectiveToken = connection.api_token_encrypted || datafyToken;
+    const chosenProvider = isMetaActive ? 'meta' : 'datafy';
 
-    // Validação explícita: token DEVE existir antes de prosseguir
-    if (!effectiveToken) {
-      return NextResponse.json({
-        error: 'DATAFY_API_TOKEN não configurado no servidor. Adicione essa variável ao .env.local (desenvolvimento) ou nas Environment Variables do Vercel (produção) e reinicie o servidor.'
-      }, { status: 500 });
-    }
-
-    // Auto-healing: se phone_number_id estiver nulo no banco, busca na Datafy via GET /me
-    let phoneNumberId = connection.phone_number_id;
-    if (!phoneNumberId) {
-      console.log('[Datafy] phone_number_id ausente no banco — consultando GET /me para auto-healing...');
-      try {
-        const meRes = await fetch('https://cloud.datafyapi.com.br/me', {
-          headers: { Authorization: `Bearer ${effectiveToken}` },
-        });
-        if (meRes.ok) {
-          const meData = await meRes.json();
-          phoneNumberId = meData?.phone_number_id || null;
-          if (phoneNumberId) {
-            console.log(`[Datafy] Auto-healing: phone_number_id recuperado = ${phoneNumberId}`);
-            // Atualiza o banco com o valor correto para próximas chamadas
-            await userClient
-              .from('whatsapp_connections')
-              .update({ phone_number_id: phoneNumberId })
-              .eq('id', connection.id);
-          }
-        }
-      } catch (e) {
-        console.warn('[Datafy] Falha no auto-healing GET /me:', e);
-      }
-    }
-
-    if (!phoneNumberId) {
-      return NextResponse.json({
-        error: 'Phone Number ID não configurado. Acesse as Configurações do WhatsApp e reconecte seu número.'
-      }, { status: 400 });
-    }
-
+    // 1. Inserir log inicial como pending
     const { data: logEntry } = await userClient
       .from('whatsapp_message_logs')
       .insert({
         user_id: user.id,
-        whatsapp_connection_id: connection.id,
+        whatsapp_connection_id: connection?.id || null,
         mensalidade_id: mensalidadeId || null,
         aluno_id: alunoId || null,
         responsavel_id: responsavelId || null,
         phone: normalizedPhone,
         message_type: messageType,
         message_content: message,
-        provider: 'datafy',
+        provider: chosenProvider,
         status: 'pending',
       })
       .select()
       .single();
 
-    // Disparar via Datafy API (tentativa texto livre ou template)
-    const apiUrl = `${datafyBaseUrl}/${phoneNumberId}/messages`;
-    console.log(`[Datafy] Enviando para ${apiUrl} -> Destino: ${normalizedPhone}`);
-
-
-    // Montar payload de texto
-    const textPayload = {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to: normalizedPhone,
-      type: 'text',
-      text: { preview_url: false, body: message },
-    };
-
-    let res = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${effectiveToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(textPayload),
-    });
-
-    let data = await res.json().catch(() => ({}));
-    console.log(`[Datafy Response] Status: ${res.status}`, data);
-
-    // Se a Meta rejeitou o texto livre por política de 24h ou ausência de template
-    if (!res.ok && data?.error?.code === 100) {
-      console.log('[Datafy] Tentando envio via template aprovado de lembrete...');
-      const templatePayload = {
-        messaging_product: 'whatsapp',
+    // 2. DISPARO PRINCIPAL: META CLOUD API
+    if (isMetaActive) {
+      console.log(`[WhatsApp Send] Enviando via Meta Cloud API oficial -> Destino: ${normalizedPhone}`);
+      const metaRes = await sendMetaWhatsAppText({
         to: normalizedPhone,
-        type: 'template',
-        template: {
-          name: 'lembrete_mensalidade',
-          language: { code: 'pt_BR' },
-          components: [
-            {
-              type: 'body',
-              parameters: [
-                { type: 'text', text: 'R$ 150,00' },
-                { type: 'text', text: new Date().toLocaleDateString('pt-BR') }
-              ]
-            }
-          ]
-        }
-      };
-
-      const templateRes = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${effectiveToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(templatePayload),
+        text: message,
       });
 
-      const templateData = await templateRes.json().catch(() => ({}));
-      if (templateRes.ok) {
-        res = templateRes;
-        data = templateData;
+      if (metaRes.success && metaRes.messageId) {
+        if (logEntry) {
+          await userClient
+            .from('whatsapp_message_logs')
+            .update({
+              status: 'sent',
+              provider_message_id: metaRes.messageId,
+              sent_at: new Date().toISOString(),
+            })
+            .eq('id', logEntry.id);
+        }
+        return NextResponse.json({ success: true, messageId: metaRes.messageId, provider: 'meta' });
       }
-    }
 
-    if (!res.ok) {
-      let friendlyError = data?.error?.message || data?.message || `Erro da Datafy API (HTTP ${res.status})`;
-      if (data?.error?.code === 100) {
-        friendlyError = 'O número está conectado, mas a Meta exige que o template ou número finalize a verificação (aguarde a aprovação da Meta ou envie um "Oi" para o WhatsApp da escola para abrir a janela de teste).';
+      // Falha na Meta
+      let friendlyError = metaRes.error || 'Falha ao enviar mensagem pela Meta Cloud API';
+      if (metaRes.errorCode === 131047 || metaRes.errorCode === 100) {
+        friendlyError = 'A Meta exige janela aberta de 24h para envio de texto livre. Para cobranças sem conversa prévia, deve ser utilizado um template aprovado na Meta.';
       }
+
       if (logEntry) {
         await userClient
           .from('whatsapp_message_logs')
-          .update({ status: 'failed', error_message: friendlyError })
+          .update({
+            status: 'failed',
+            error_message: friendlyError,
+          })
           .eq('id', logEntry.id);
       }
-      return NextResponse.json({ error: friendlyError }, { status: 400 });
+
+      return NextResponse.json({ error: friendlyError, code: metaRes.errorCode }, { status: 400 });
+    }
+
+    // 3. FALLBACK LEGADO: DATAFY (apenas se Meta NÃO estiver configurada no ambiente)
+    const datafyToken = process.env.DATAFY_API_TOKEN || connection?.api_token_encrypted || '';
+    const datafyBaseUrl = (process.env.DATAFY_API_BASE_URL || 'https://cloud.datafyapi.com.br/v1').replace(/\/$/, '');
+    const phoneNumberId = connection?.phone_number_id;
+
+    if (!datafyToken || !phoneNumberId) {
+      const errorMsg = 'WhatsApp não configurado. Adicione as variáveis WHATSAPP_ACCESS_TOKEN e WHATSAPP_PHONE_NUMBER_ID no Vercel.';
+      if (logEntry) {
+        await userClient
+          .from('whatsapp_message_logs')
+          .update({ status: 'failed', error_message: errorMsg })
+          .eq('id', logEntry.id);
+      }
+      return NextResponse.json({ error: errorMsg }, { status: 400 });
+    }
+
+    console.log(`[WhatsApp Send] Meta não configurada. Enviando via Datafy legado -> Destino: ${normalizedPhone}`);
+    const apiUrl = `${datafyBaseUrl}/${phoneNumberId}/messages`;
+
+    const res = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${datafyToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: normalizedPhone,
+        type: 'text',
+        text: { preview_url: false, body: message },
+      }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      const errText = data?.error?.message || data?.message || `Erro HTTP ${res.status}`;
+      if (logEntry) {
+        await userClient
+          .from('whatsapp_message_logs')
+          .update({ status: 'failed', error_message: errText })
+          .eq('id', logEntry.id);
+      }
+      return NextResponse.json({ error: errText }, { status: 400 });
     }
 
     const providerMsgId = data?.messages?.[0]?.id || data?.id;
-
     if (logEntry) {
       await userClient
         .from('whatsapp_message_logs')
@@ -208,7 +171,7 @@ export async function POST(req: Request) {
         .eq('id', logEntry.id);
     }
 
-    return NextResponse.json({ success: true, messageId: providerMsgId });
+    return NextResponse.json({ success: true, messageId: providerMsgId, provider: 'datafy' });
   } catch (err: any) {
     console.error('[API Send WhatsApp Error]', err);
     return NextResponse.json({ error: err.message || 'Falha interna ao enviar mensagem' }, { status: 500 });

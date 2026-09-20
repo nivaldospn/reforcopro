@@ -291,7 +291,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         supabase.from('classes').select('*').eq('user_id', userId),
         supabase.from('payments').select('*').eq('user_id', userId),
         supabase.from('student_grades').select('*').eq('user_id', userId),
-        supabase.from('whatsapp_connections').select('*').eq('user_id', userId).eq('provider', 'datafy').maybeSingle(),
+        supabase.from('whatsapp_connections').select('*').eq('user_id', userId).in('provider', ['meta', 'datafy']).order('created_at', { ascending: false }).limit(1).maybeSingle(),
         supabase.from('whatsapp_settings').select('*').eq('user_id', userId).maybeSingle(),
         supabase.from('whatsapp_message_logs').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(100),
         Promise.resolve(supabase.from('financial_entries').select('*').eq('user_id', userId).order('date', { ascending: false })).catch(() => ({ data: [] })),
@@ -930,9 +930,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const saveWhatsAppConnection = async (data: Partial<WhatsAppConnection>) => {
     if (!user) return;
+    const provider = data.provider || (process.env.NEXT_PUBLIC_WHATSAPP_PROVIDER as any) || 'meta';
     const payload = {
       user_id: user.id,
-      provider: 'datafy',
+      provider: provider,
       phone_number_id: data.phone_number_id,
       waba_id: data.waba_id,
       phone_number: data.phone_number,
@@ -954,6 +955,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const disconnectWhatsApp = async () => {
     if (!user) return;
+    const currentProvider = whatsappConnection?.provider || 'meta';
     const { error } = await supabase
       .from('whatsapp_connections')
       .update({
@@ -961,7 +963,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         last_error: null,
       })
       .eq('user_id', user.id)
-      .eq('provider', 'datafy');
+      .eq('provider', currentProvider);
 
     if (error) throw error;
     setWhatsappConnection(prev => prev ? { ...prev, status: 'disconnected' } : null);
