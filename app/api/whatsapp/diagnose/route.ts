@@ -22,7 +22,8 @@ export async function GET(req: Request) {
     const metaToken = process.env.WHATSAPP_ACCESS_TOKEN || '';
     const metaPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
     const metaWabaId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '';
-    const metaVersion = process.env.WHATSAPP_API_VERSION || 'v21.0';
+    // v22.0 é a versão mínima segura após a descontinuação de v20.0 em set/2026.
+    const metaVersion = process.env.WHATSAPP_API_VERSION || 'v22.0';
 
     // Variáveis Datafy API (Legado)
     const datafyToken  = process.env.DATAFY_API_TOKEN || '';

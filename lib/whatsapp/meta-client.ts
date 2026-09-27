@@ -113,12 +113,17 @@ export function extractPixKeyFromMessageTemplate(messageTemplate?: string, expli
 
 /**
  * Retorna as credenciais da Meta configuradas no ambiente
+ *
+ * ATENÇÃO: Use WHATSAPP_API_VERSION para sobrescrever a versão da Graph API.
+ * O padrão é v22.0 (versão estável — v20.0 foi descontinuada em set/2026).
  */
 export function getMetaWhatsAppConfig() {
   const token = process.env.WHATSAPP_ACCESS_TOKEN || '';
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
   const businessAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '';
-  const apiVersion = process.env.WHATSAPP_API_VERSION || 'v21.0';
+  // v22.0 é a versão mínima segura após a descontinuação de v20.0 em set/2026.
+  // Sobrescreva com WHATSAPP_API_VERSION na Vercel se necessário.
+  const apiVersion = process.env.WHATSAPP_API_VERSION || 'v22.0';
   const paymentReminderTemplate = process.env.WHATSAPP_PAYMENT_REMINDER_TEMPLATE || META_DEFAULT_PAYMENT_TEMPLATE;
 
   return {
@@ -162,6 +167,9 @@ export async function sendMetaWhatsAppText(params: MetaSendTextMessageParams): P
   }
 
   const url = `https://graph.facebook.com/${config.apiVersion}/${config.phoneNumberId}/messages`;
+
+  // Log seguro do endpoint usado (sem token) para diagnóstico em Vercel
+  console.log(`[Meta WhatsApp] sendText -> POST ${url} | phoneNumberId=${config.phoneNumberId} | apiVersion=${config.apiVersion}`);
 
   const payload = {
     messaging_product: 'whatsapp',
@@ -253,6 +261,9 @@ export async function sendMetaWhatsAppTemplate(params: MetaSendTemplateMessagePa
   }
 
   const url = `https://graph.facebook.com/${config.apiVersion}/${config.phoneNumberId}/messages`;
+
+  // Log seguro do endpoint usado (sem token) para diagnóstico em Vercel
+  console.log(`[Meta WhatsApp] sendTemplate '${params.templateName}' -> POST ${url} | phoneNumberId=${config.phoneNumberId} | apiVersion=${config.apiVersion}`);
 
   const payload = {
     messaging_product: 'whatsapp',
