@@ -1035,7 +1035,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const student = students.find(s => s.id === payment?.studentId);
     const guardian = guardians.find(g => g.id === student?.guardianId);
 
-    const messageText = customMessage || `Olá, ${guardian?.name.split(' ')[0] || 'Responsável'}! 😊\n\nPassando para lembrar que a mensalidade do aluno ${student?.name || 'Aluno'} no valor de R$ ${payment?.amount.toFixed(2)} venceu ou está próxima do vencimento (${payment?.date}).\n\nObrigado!`;
+    // Extrair chave Pix do template de mensagem configurado pelo professor
+    const messageTemplate = whatsappSettings?.message_template || '';
+    const pixKeyMatch = messageTemplate.match(/(?:chave\s*pix|pix)\s*[:：*]\s*([^\n\r*]+)/i);
+    const extractedPixKey = pixKeyMatch ? pixKeyMatch[1].replace(/[*_~`]/g, '').trim() : '';
+
+    // Dados formatados para o template oficial da Meta (lembrete_mensalidade)
+    const responsavelNome = guardian?.name?.split(' ')[0] || 'Responsável';
+    const alunoNome = student?.name || 'Aluno';
+    const valorFormatado = payment?.amount
+      ? Number(payment.amount).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+      : 'R$ 0,00';
+    const vencimentoFormatado = payment?.date || '';
+
+    // Mensagem de fallback para Datafy ou casos sem templateParams
+    const messageText = customMessage || `Olá, ${responsavelNome}! 😊\n\nPassando para lembrar que a mensalidade do aluno ${alunoNome} no valor de ${valorFormatado} venceu ou está próxima do vencimento (${vencimentoFormatado}).\n\nObrigado!`;
 
     try {
       const response = await fetch('/api/whatsapp/send', {
@@ -1051,6 +1065,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           mensalidadeId: paymentId,
           alunoId: student?.id,
           responsavelId: guardian?.id,
+          // templateParams: usados pelo endpoint quando Meta Cloud API está ativa
+          templateParams: {
+            responsavel: responsavelNome,
+            aluno: alunoNome,
+            valor: valorFormatado,
+            vencimento: vencimentoFormatado,
+            chave_pix: extractedPixKey,
+          },
         }),
       });
 

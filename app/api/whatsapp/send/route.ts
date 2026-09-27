@@ -5,6 +5,8 @@ import {
   isValidBrazilianPhone,
   getMetaWhatsAppConfig,
   sendMetaWhatsAppText,
+  sendMetaWhatsAppTemplate,
+  META_DEFAULT_PAYMENT_TEMPLATE,
 } from '@/lib/whatsapp/meta-client';
 
 export async function POST(req: Request) {
@@ -27,10 +29,21 @@ export async function POST(req: Request) {
     }
 
     const payload = await req.json();
-    const { to, message, messageType = 'manual_payment_reminder', mensalidadeId, alunoId, responsavelId } = payload;
+    const {
+      to,
+      message,
+      messageType = 'manual_payment_reminder',
+      mensalidadeId,
+      alunoId,
+      responsavelId,
+      // templateParams: passados para envio via template Meta (manual_payment_reminder)
+      templateParams,
+    } = payload;
 
-    if (!to || !message) {
-      return NextResponse.json({ error: 'Destinatário e mensagem são obrigatórios' }, { status: 400 });
+    // message só é obrigatório para envios de texto livre (test_message / fallback Datafy)
+    const isPaymentReminder = messageType === 'manual_payment_reminder';
+    if (!to || (!message && !templateParams)) {
+      return NextResponse.json({ error: 'Destinatário e mensagem ou parâmetros do template são obrigatórios' }, { status: 400 });
     }
 
     const normalizedPhone = normalizeBrazilianPhone(to);
@@ -74,10 +87,37 @@ export async function POST(req: Request) {
     // 2. DISPARO PRINCIPAL: META CLOUD API
     if (isMetaActive) {
       console.log(`[WhatsApp Send] Enviando via Meta Cloud API oficial -> Destino: ${normalizedPhone}`);
-      const metaRes = await sendMetaWhatsAppText({
-        to: normalizedPhone,
-        text: message,
-      });
+
+      let metaRes;
+
+      if (isPaymentReminder && templateParams) {
+        // Lembrete manual de cobrança: usa template aprovado para iniciar conversa sem janela de 24h
+        const templateNameToUse = process.env.WHATSAPP_PAYMENT_REMINDER_TEMPLATE || META_DEFAULT_PAYMENT_TEMPLATE;
+        console.log(`[WhatsApp Send] Usando template '${templateNameToUse}' para lembrete manual de cobrança`);
+        metaRes = await sendMetaWhatsAppTemplate({
+          to: normalizedPhone,
+          templateName: templateNameToUse,
+          languageCode: 'pt_BR',
+          components: [
+            {
+              type: 'body',
+              parameters: [
+                { type: 'text', text: templateParams.responsavel || 'Responsável' },
+                { type: 'text', text: templateParams.aluno || 'Aluno' },
+                { type: 'text', text: templateParams.valor || 'R$ 0,00' },
+                { type: 'text', text: templateParams.vencimento || '' },
+                { type: 'text', text: templateParams.chave_pix || 'Não informada' },
+              ],
+            },
+          ],
+        });
+      } else {
+        // Mensagem de teste ou texto livre (aceito apenas se houver janela de 24h)
+        metaRes = await sendMetaWhatsAppText({
+          to: normalizedPhone,
+          text: message,
+        });
+      }
 
       if (metaRes.success && metaRes.messageId) {
         if (logEntry) {
@@ -96,7 +136,9 @@ export async function POST(req: Request) {
       // Falha na Meta
       let friendlyError = metaRes.error || 'Falha ao enviar mensagem pela Meta Cloud API';
       if (metaRes.errorCode === 131047 || metaRes.errorCode === 100) {
-        friendlyError = 'A Meta exige janela aberta de 24h para envio de texto livre. Para cobranças sem conversa prévia, deve ser utilizado um template aprovado na Meta.';
+        friendlyError = isPaymentReminder
+          ? `Falha ao enviar o template '${process.env.WHATSAPP_PAYMENT_REMINDER_TEMPLATE || META_DEFAULT_PAYMENT_TEMPLATE}'. Verifique se o template está aprovado e ativo no WhatsApp Business Manager.`
+          : 'A Meta exige janela aberta de 24h para envio de texto livre. Para cobranças sem conversa prévia, utilize um template aprovado na Meta.';
       }
 
       if (logEntry) {
