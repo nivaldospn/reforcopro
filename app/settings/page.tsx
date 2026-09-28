@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Layout } from '@/components/Layout';
 import { useApp } from '@/lib/store';
+import { supabase } from '@/lib/supabase';
 import { useTheme } from '@/components/ThemeProvider';
 import { 
   User, 
@@ -28,7 +29,9 @@ import {
   History,
   Check,
   XCircle,
-  FileText
+  FileText,
+  Stethoscope,
+  RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '@/lib/utils';
@@ -65,7 +68,12 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<'perfil' | 'whatsapp' | 'aparencia' | 'conta'>('perfil');
 
   // WhatsApp Sub-tabs & States
-  const [waSubTab, setWaSubTab] = useState<'conexao' | 'lembretes' | 'historico'>('conexao');
+  const [waSubTab, setWaSubTab] = useState<'conexao' | 'lembretes' | 'historico' | 'diagnostico'>('conexao');
+
+  // Diagnóstico Meta API — estado local temporário
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [diagResult, setDiagResult] = useState<any>(null);
+  const [diagError, setDiagError] = useState<string | null>(null);
   const [isConnectingWa, setIsConnectingWa] = useState(false);
   const [isSavingWaSettings, setIsSavingWaSettings] = useState(false);
   const [waSettingsStatus, setWaSettingsStatus] = useState<'idle' | 'success' | 'error'>('idle');
@@ -390,6 +398,18 @@ export default function SettingsPage() {
                     >
                       <History size={16} />
                       Histórico ({whatsappLogs.length})
+                    </button>
+                    <button
+                      onClick={() => setWaSubTab('diagnostico')}
+                      className={cn(
+                        "flex items-center gap-2 px-5 py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all whitespace-nowrap",
+                        waSubTab === 'diagnostico'
+                          ? "bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 shadow-sm"
+                          : "text-slate-500 dark:text-slate-400 hover:text-slate-900"
+                      )}
+                    >
+                      <Stethoscope size={16} />
+                      Diagnóstico
                     </button>
                   </div>
 
@@ -989,6 +1009,126 @@ export default function SettingsPage() {
                             )}
                           </tbody>
                         </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* SUB-ABA: DIAGNÓSTICO META API (TEMPORÁRIA) */}
+                  {waSubTab === 'diagnostico' && (
+                    <div className="space-y-6">
+                      <div className="premium-card p-6 sm:p-8 border-amber-100 dark:border-amber-900/30">
+                        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
+                          <div className="flex items-center gap-3">
+                            <div className="w-12 h-12 bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 rounded-2xl flex items-center justify-center shrink-0">
+                              <Stethoscope size={24} />
+                            </div>
+                            <div>
+                              <h3 className="text-lg font-black text-slate-900 dark:text-white tracking-tight">Diagnóstico da API Meta</h3>
+                              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Verifica token, Phone Number ID, WABA e templates. Apenas leitura — não envia mensagens.</p>
+                            </div>
+                          </div>
+                          <button
+                            id="btn-executar-diagnostico"
+                            onClick={async () => {
+                              setDiagLoading(true);
+                              setDiagResult(null);
+                              setDiagError(null);
+                              try {
+                                // Padrão do projeto: supabase.auth.getSession() → access_token
+                                const { data: { session } } = await supabase.auth.getSession();
+                                if (!session?.access_token) {
+                                  setDiagError('Sessão expirada. Faça login novamente.');
+                                  return;
+                                }
+                                const res = await fetch('/api/whatsapp/diagnose', {
+                                  method: 'GET',
+                                  headers: {
+                                    'Authorization': `Bearer ${session.access_token}`,
+                                  },
+                                });
+                                const data = await res.json();
+                                if (!res.ok) {
+                                  setDiagError(data.error || `Erro HTTP ${res.status}`);
+                                } else {
+                                  setDiagResult(data);
+                                }
+                              } catch (e: any) {
+                                setDiagError(e.message || 'Falha de rede ao executar diagnóstico.');
+                              } finally {
+                                setDiagLoading(false);
+                              }
+                            }}
+                            disabled={diagLoading}
+                            className="flex items-center gap-2 px-6 py-3 bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white rounded-2xl font-black text-xs uppercase tracking-wider transition-all active:scale-95 whitespace-nowrap shrink-0"
+                          >
+                            {diagLoading ? (
+                              <><Loader2 size={16} className="animate-spin" /> Executando...</>
+                            ) : (
+                              <><RefreshCw size={16} /> Executar Diagnóstico</>
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Aviso de segurança */}
+                        <div className="p-4 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-slate-100 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400 mb-6">
+                          🔒 <strong>Seguro:</strong> O token de acesso à Meta nunca aparece nesta tela nem nos logs. O diagnóstico realiza apenas requisições GET de leitura na Graph API.
+                        </div>
+
+                        {/* Erro */}
+                        {diagError && (
+                          <div className="p-4 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded-2xl flex items-start gap-3 mb-4">
+                            <AlertCircle size={18} className="text-rose-500 shrink-0 mt-0.5" />
+                            <div>
+                              <p className="text-sm font-black text-rose-700 dark:text-rose-400">Falha ao executar diagnóstico</p>
+                              <p className="text-xs text-rose-600/80 dark:text-rose-400/70 mt-0.5">{diagError}</p>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Resultado */}
+                        {diagResult && (
+                          <div className="space-y-4">
+                            {/* Resumo em destaque */}
+                            <div className={`p-4 rounded-2xl border text-sm font-bold ${
+                              diagResult.resumo?.startsWith('🟢')
+                                ? 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300'
+                                : diagResult.resumo?.startsWith('🔴')
+                                ? 'bg-rose-50 dark:bg-rose-900/20 border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-300'
+                                : 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300'
+                            }`}>
+                              {diagResult.resumo}
+                            </div>
+
+                            {/* JSON completo — legível e copiável */}
+                            <div className="relative">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Resultado completo</span>
+                                <button
+                                  id="btn-copiar-diagnostico"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(JSON.stringify(diagResult, null, 2));
+                                  }}
+                                  className="text-[10px] font-black uppercase tracking-widest text-blue-500 hover:text-blue-700 transition-colors"
+                                >
+                                  Copiar JSON
+                                </button>
+                              </div>
+                              <pre className="w-full overflow-auto max-h-[500px] p-4 bg-slate-950 dark:bg-black text-emerald-300 text-[11px] font-mono rounded-2xl border border-slate-800 leading-relaxed whitespace-pre-wrap break-words">
+                                {JSON.stringify(diagResult, null, 2)}
+                              </pre>
+                            </div>
+
+                            <p className="text-[10px] text-slate-400 text-center">
+                              Executado em: {new Date(diagResult.diagnostico_executado_em).toLocaleString('pt-BR')} · Usuário: {diagResult.usuario_autenticado}
+                            </p>
+                          </div>
+                        )}
+
+                        {!diagResult && !diagError && !diagLoading && (
+                          <div className="py-8 text-center text-slate-400 text-sm">
+                            Clique em <strong>Executar Diagnóstico</strong> para verificar a integração com a Meta Cloud API.
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
